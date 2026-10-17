@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FairShare</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    const API_URL =
+      'https://script.google.com/macros/s/AKfycbwxwtGpu3TdOhAXy0SWxL-utxfss-jHZgsJwZSXNO9HB4QfL1YhJLzdqg7U1TsaHgR90A/exec';
+
+    const USERS = [
+      { name: 'Ashish' },
+      { name: 'Gyan' },
+      { name: 'Navin' },
+      { name: 'Rishabh' }
+    ];
+
+    const isSettlement = (expense) =>
+      String(expense.itemName || '').startsWith('Settlement:');
+
+    const money = (amount) =>
+      Number(amount || 0).toLocaleString('en-IN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+
+    const formatDateTime24 = (rawDate = new Date()) => {
+      const date = new Date(rawDate);
+      if (Number.isNaN(date.getTime())) return String(rawDate || '');
+
+      const day = String(date.getDate()).padStart(2, '0');
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const year = date.getFullYear();
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
+      const seconds = String(date.getSeconds()).padStart(2, '0');
+
+      return `${day}/${month}/${year}, ${hours}:${minutes}:${seconds}`;
+    };
+
+    function calculateSummary(expenses, users) {
+      const regularExpenses = expenses.filter(e => !isSettlement(e));
+      const settlementRecords = expenses.filter(isSettlement);
+
+      const totalSpent = regularExpenses.reduce(
+        (sum, expense) => sum + Number(expense.amount || 0),
+        0
+      );
+
+      const fairShare = totalSpent / (users.length || 1);
+
+      const userStats = users.map(user => {
+        const totalPaid = regularExpenses
+          .filter(e => e.paidBy === user.name)
+          .reduce((sum, e) => sum + Number(e.amount || 0), 0);
+
+        const settlementsPaidOut = settlementRecords
+          .filter(e => e.paidBy === user.name)
+          .reduce((sum, e) => sum + Number(e.amount || 0), 0);
+
+        const settlementsReceived = settlementRecords
+          .filter(e => String(e.itemName || '').includes(` paid ${user.name}`))
+          .reduce((sum, e) => sum + Number(e.amount || 0), 0);
+
+        const balance = totalPaid + settlementsPaidOut - settlementsReceived - fairShare;
+
+        return {
+          name: user.name,
+          paid: totalPaid,
+          balance
+        };
+      });
+
+      const debtors = userStats
+        .filter(u => u.balance < -0.005)
+        .map(u => ({ ...u, remaining: -u.balance }))
+        .sort((a, b) => b.remaining - a.remaining);
+
+      const creditors = userStats
+        .filter(u => u.balance > 0.005)
+        .map(u => ({ ...u, remaining: u.balance }))
+        .sort((a, b) => b.remaining - a.remaining);
+
+      const settlements = [];
+      let d = 0;
+      let c = 0;
+
+      while (d < debtors.length && c < creditors.length) {
+        const debtor = debtors[d];
+        const creditor = creditors[c];
+        const amount = Math.min(debtor.remaining, creditor.remaining);
+
+        if (amount > 0.005) {
+          settlements.push({
+            from: debtor.name,
+            to: creditor.name,
+            amount: Math.round(amount * 100) / 100
+          });
+        }
+
+        debtor.remaining -= amount;
+        creditor.remaining -= amount;
+
+        if (debtor.remaining < 0.005) d++;
+        if (creditor.remaining < 0.005) c++;
+      }
+
+      return { regularExpenses, settlementRecords, totalSpent, fairShare, userStats, settlements };
+    }
+
+    function App() {
+      const [theme, setTheme] = useState(
+        () => localStorage.getItem('fairshare_theme') || 'light'
+      );
+      const [expenses, setExpenses] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState('');
+      const [fabOpen, setFabOpen] = useState(false);
+      const [modal, setModal] = useState(null);
+      const [busy, setBusy] = useState(false);
+
+      const summary = useMemo(
+        () => calculateSummary(expenses, USERS),
+        [expenses]
+      );
+
+      useEffect(() => {
+        fetchSheetData();
+      }, []);
+
+      useEffect(() => {
+        localStorage.setItem('fairshare_theme', theme);
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+      }, [theme]);
+
+      async function fetchSheetData() {
+        setLoading(true);
+        setError('');
+
+        try {
+          const response = await fetch(
+            `${API_URL}?action=getData&t=${Date.now()}`
+          );
+
+          if (!response.ok) throw new Error('Unable to fetch Google Sheets data.');
+
+          const data = await response.json();
+
+          if (Array.isArray(data.expenses)) {
+            setExpenses(data.expenses);
+          } else {
+            throw new Error('The API response does not contain an expenses array.');
+          }
+        } catch (err) {
+          console.error('Google Sheets fetch error:', err);
+          setError('Unable to refresh data. Check your connection and try again.');
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      async function executeSheetAction(params, onDone) {
+        if (busy) return;
+        setBusy(true);
+        setError('');
+
+        try {
+          // Convert params object to query string for GET request
+          const queryString = new URLSearchParams(params).toString();
+          const response = await fetch(`${API_URL}?${queryString}`);
+
+          if (!response.ok) throw new Error('Network response was not ok.');
+
+          const result = await response.json();
+
+          if (result.status === 'success') {
+            await fetchSheetData();
+            if (onDone) onDone();
+          } else {
+            // Handle backend errors (like incorrect PIN)
+            setError(result.message || 'Action failed on the server.');
+          }
+        } catch (err) {
+          console.error('Submission error:', err);
+          setError('Unable to save. Check your connection or mobile browser settings.');
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function handleAddExpense(item) {
+        executeSheetAction({
+          action: 'addExpense',
+          itemName: item.itemName,
+          amount: item.amount,
+          paidBy: item.paidBy,
+          timestamp: formatDateTime24()
+        }, () => setModal(null));
+      }
+
+      function handleSettleUp(settlement, pin, onSuccess, onFailure) {
+        if (busy) return;
+
+        const latest = calculateSummary(expenses, USERS);
+        const matchingSettlement = latest.settlements.find(s =>
+          s.from === settlement.from &&
+          s.to === settlement.to &&
+          Math.abs(s.amount - settlement.amount) < 0.005
+        );
+
+        if (!matchingSettlement) {
+          setError('This settlement plan has changed. Refresh and try again.');
+          setModal(null);
+          fetchSheetData();
+          return;
+        }
+
+        // Send pin to backend for verification
+        executeSheetAction({
+          action: 'addSettlement',
+          itemName: `Settlement: ${matchingSettlement.from} paid ${matchingSettlement.to}`,
+          amount: matchingSettlement.amount,
+          paidBy: matchingSettlement.from,
+          pin: pin,
+          timestamp: formatDateTime24()
+        }, () => {
+          setModal(null);
+          if (onSuccess) onSuccess();
+        });
+      }
+
+      const dark = theme === 'dark';
+
+      return (
+        <div className={`min-h-screen pb-28 transition-colors ${dark ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-800'
+          }`}>
+          <header className={`sticky top-0 z-30 border-b backdrop-blur-md px-5 py-4 flex justify-between items-center ${dark ? 'bg-slate-900/90 border-slate-800' : 'bg-white/90 border-slate-200'
+            }`}>
+            <div className="flex items-center gap-3">
+              <span className="text-3xl">🏠</span>
+              <div>
+                <h1 className="text-xl font-bold text-indigo-600 dark:text-indigo-400">
+                  FairShare
+                </h1>
+                <p className="text-xs text-slate-400">
+                  Total Spent: ₹{money(summary.totalSpent)} ·
+                  {' '}₹{money(summary.fairShare)}/person
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={fetchSheetData}
+              disabled={loading || busy}
+              className="rounded-xl bg-indigo-50 dark:bg-indigo-950 px-3 py-2 text-indigo-600 dark:text-indigo-300 disabled:opacity-50"
+              title="Refresh expenses"
+            >
+              🔄
+            </button>
+          </header>
+
+          <main className="max-w-3xl mx-auto p-4 sm:p-6 space-y-5">
+            <div className="flex justify-between items-center">
+              <h2 className="text-lg font-bold">Activity Feed</h2>
+              <span className="text-xs text-emerald-500">● Google Sheets</span>
+            </div>
+
+            {error && (
+              <div className="rounded-xl bg-rose-50 text-rose-700 p-3 text-sm">
+                {error}
+                <button className="ml-2 underline" onClick={() => setError('')}>
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {loading ? (
+              <div className="text-center py-16 text-slate-400">
+                Fetching expenses from Google Sheets...
+              </div>
+            ) : expenses.length === 0 ? (
+              <div className="text-center py-16 border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-3xl text-slate-400">
+                <p className="font-medium">No expenses found.</p>
+                <p className="text-xs mt-1">Use + to add your first expense.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {expenses.map((exp, index) => (
+                  <div
+                    key={exp.id ?? `${exp.timestamp}-${index}`}
+                    className={`p-4 rounded-2xl border shadow-sm flex justify-between items-center gap-3 ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'
+                      }`}
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="font-semibold break-words">
+                        {exp.itemName}
+                        {isSettlement(exp) && (
+                          <span className="ml-2 inline-block text-[10px] px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                            SETTLEMENT
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        <strong className="text-indigo-500">{exp.paidBy}</strong>
+                        {' · '}{formatDateTime24(exp.timestamp)}
+                      </div>
+                    </div>
+                    <div className={`font-bold whitespace-nowrap ${isSettlement(exp)
+                      ? 'text-indigo-600 dark:text-indigo-400'
+                      : 'text-emerald-600 dark:text-emerald-400'
+                      }`}>
+                      ₹{money(exp.amount)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </main>
+
+          <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-3">
+            {fabOpen && (
+              <div className={`flex flex-col gap-2 p-2 rounded-2xl shadow-xl border ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'
+                }`}>
+                <button
+                  onClick={() => { setModal('SUMMARY'); setFabOpen(false); }}
+                  className="text-left px-4 py-3 rounded-xl text-sm hover:bg-slate-100 dark:hover:bg-slate-700"
+                >
+                  📊 Settlement Summary
+                </button>
+                <button
+                  onClick={() => { setModal('ADD'); setFabOpen(false); }}
+                  className="text-left px-4 py-3 rounded-xl text-sm bg-indigo-600 text-white"
+                >
+                  ➕ Add Expense
+                </button>
+                <button
+                  onClick={() => { setTheme(dark ? 'light' : 'dark'); setFabOpen(false); }}
+                  className="text-left px-4 py-3 rounded-xl text-sm hover:bg-slate-100 dark:hover:bg-slate-700"
+                >
+                  {dark ? '☀️ Light Mode' : '🌙 Dark Mode'}
+                </button>
+              </div>
+            )}
+            <button
+              onClick={() => setFabOpen(!fabOpen)}
+              className="w-14 h-14 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full shadow-xl text-2xl"
+              aria-label={fabOpen ? 'Close menu' : 'Open menu'}
+            >
+              {fabOpen ? '✕' : '+'}
+            </button>
+          </div>
+
+          {modal === 'ADD' && (
+            <ItemModal
+              usersList={USERS}
+              theme={theme}
+              busy={busy}
+              onClose={() => setModal(null)}
+              onSave={handleAddExpense}
+            />
+          )}
+
+          {modal === 'SUMMARY' && (
+            <SummaryModal
+              summary={summary}
+              theme={theme}
+              busy={busy}
+              onClose={() => setModal(null)}
+              onSettleUp={handleSettleUp}
+            />
+          )}
+        </div>
+      );
+    }
+
+    function SummaryModal({ summary, theme, busy, onClose, onSettleUp }) {
+      const [selected, setSelected] = useState(null);
+      const [pin, setPin] = useState('');
+      const [error, setError] = useState('');
+
+      const dark = theme === 'dark';
+
+      function confirmSettlement(e) {
+        e.preventDefault();
+        if (!selected || busy) return;
+
+        onSettleUp(selected, pin, () => {
+          setSelected(null);
+          setPin('');
+          setError('');
+        });
+      }
+
+      return (
+        <div className="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className={`w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 rounded-3xl shadow-2xl border space-y-5 ${dark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200'
+            }`}>
+            <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-700 pb-3">
+              <h2 className="font-bold text-lg">📊 Settlement Summary</h2>
+              <button onClick={onClose} className="text-slate-400 text-xl" aria-label="Close">✕</button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              {summary.userStats.map(user => (
+                <div key={user.name} className={`p-3 rounded-2xl border ${dark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-100'
+                  }`}>
+                  <p className="text-xs text-slate-400">{user.name}</p>
+                  <p className="font-bold mt-1">₹{money(user.paid)}</p>
+                  <p className={`text-sm font-semibold mt-1 ${user.balance >= -0.005 ? 'text-emerald-500' : 'text-rose-500'
+                    }`}>
+                    {user.balance > 0.005 ? '+' : user.balance < -0.005 ? '−' : ''}
+                    ₹{money(Math.abs(user.balance))}
+                  </p>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    {user.balance > 0.005
+                      ? 'Should receive'
+                      : user.balance < -0.005
+                        ? 'Owes'
+                        : 'Balanced'}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            <div className={`p-4 rounded-2xl border ${dark ? 'bg-slate-900 border-slate-700' : 'bg-indigo-50/50 border-indigo-100'
+              }`}>
+              <h3 className="text-xs uppercase tracking-wider font-bold text-indigo-600 dark:text-indigo-400 mb-3">
+                💸 Outstanding Settlement Plan
+              </h3>
+
+              {summary.settlements.length === 0 ? (
+                <p className="text-sm text-emerald-500">
+                  All accounts are balanced. No payments needed!
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {summary.settlements.map((settlement, index) => (
+                    <div key={`${settlement.from}-${settlement.to}-${index}`}
+                      className="flex justify-between items-center gap-3 border-b border-slate-200 dark:border-slate-700 pb-3 last:border-0 last:pb-0">
+                      <div>
+                        <p className="text-sm">
+                          <strong>{settlement.from}</strong> pays <strong>{settlement.to}</strong>
+                        </p>
+                        <p className="font-bold text-emerald-600 dark:text-emerald-400 mt-1">
+                          ₹{money(settlement.amount)}
+                        </p>
+                      </div>
+                      <button
+                        disabled={busy}
+                        onClick={() => {
+                          setSelected(settlement);
+                          setPin('');
+                          setError('');
+                        }}
+                        className="px-3 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
+                      >
+                        Settle Up
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {selected && (
+              <form onSubmit={confirmSettlement}
+                className={`p-4 rounded-2xl border space-y-3 ${dark ? 'bg-slate-900 border-indigo-500/50' : 'bg-indigo-50 border-indigo-200'
+                  }`}>
+                <h3 className="text-sm font-bold">🔒 Confirm Actual Payment</h3>
+                <p className="text-sm">
+                  Confirm that <strong>{selected.from}</strong> has already paid
+                  {' '}<strong>{selected.to}</strong>
+                  {' '}₹{money(selected.amount)} in full.
+                </p>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  value={pin}
+                  onChange={e => setPin(e.target.value)}
+                  placeholder="Enter apartment PIN"
+                  required
+                  className={`w-full rounded-xl border px-3 py-3 text-sm outline-none ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-300'
+                    }`}
+                />
+                {error && <p className="text-sm text-rose-500">{error}</p>}
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setSelected(null); setPin(''); setError(''); }}
+                    className="flex-1 rounded-xl py-3 bg-slate-200 dark:bg-slate-700 text-sm font-semibold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    className="flex-1 rounded-xl py-3 bg-indigo-600 text-white text-sm font-semibold disabled:opacity-50"
+                  >
+                    {busy ? 'Saving...' : 'Confirm Payment'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <button
+              onClick={onClose}
+              className="w-full rounded-xl py-3 bg-slate-200 dark:bg-slate-700 font-semibold"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function ItemModal({ usersList, theme, busy, onClose, onSave }) {
+      const [itemName, setItemName] = useState('');
+      const [amount, setAmount] = useState('');
+      const [paidBy, setPaidBy] = useState('Ashish');
+
+      const dark = theme === 'dark';
+
+      function submit(e) {
+        e.preventDefault();
+        const parsedAmount = Number(amount);
+
+        if (!itemName.trim() || !Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+          return;
+        }
+
+        onSave({
+          itemName: itemName.trim(),
+          amount: Math.round(parsedAmount * 100) / 100,
+          paidBy
+        });
+      }
+
+      return (
+        <div className="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className={`w-full max-w-md p-6 rounded-3xl shadow-2xl border ${dark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200'
+            }`}>
+            <div className="flex justify-between items-center mb-5">
+              <h2 className="font-bold text-lg">➕ Add New Expense</h2>
+              <button onClick={onClose} className="text-slate-400 text-xl">✕</button>
+            </div>
+
+            <form onSubmit={submit} className="space-y-4">
+              <label className="block text-xs font-semibold text-slate-400">
+                ITEM DESCRIPTION
+                <input
+                  value={itemName}
+                  onChange={e => setItemName(e.target.value)}
+                  placeholder="Groceries / Milk"
+                  required
+                  className={`mt-1 w-full border rounded-xl px-4 py-3 text-sm ${dark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-200'
+                    }`}
+                />
+              </label>
+
+              <label className="block text-xs font-semibold text-slate-400">
+                AMOUNT (₹)
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={amount}
+                  onChange={e => setAmount(e.target.value)}
+                  placeholder="0.00"
+                  required
+                  className={`mt-1 w-full border rounded-xl px-4 py-3 text-sm ${dark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-200'
+                    }`}
+                />
+              </label>
+
+              <label className="block text-xs font-semibold text-slate-400">
+                PAID BY
+                <select
+                  value={paidBy}
+                  onChange={e => setPaidBy(e.target.value)}
+                  className={`mt-1 w-full border rounded-xl px-4 py-3 text-sm ${dark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-200'
+                    }`}
+                >
+                  {usersList.map(user => (
+                    <option key={user.name} value={user.name}>{user.name}</option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="flex-1 py-3 rounded-xl bg-slate-200 dark:bg-slate-700 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="flex-1 py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50"
+                >
+                  {busy ? 'Saving...' : 'Save Expense'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+
+</html>
