@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyClothing</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#4f46e5',
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- React & ReactDOM CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel Standalone for JSX -->
+    <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 min-h-screen transition-colors duration-300">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const convertDriveLink = (url) => {
+            if (!url) return 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=500&auto=format&fit=crop&q=60';
+            if (url.includes('drive.google.com')) {
+                const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
+                if (match && match[1]) {
+                    return `https://lh3.googleusercontent.com/d/${match[1]}`;
+                }
+            }
+            return url;
+        };
+
+        const INITIAL_ITEMS = [
+            { id: '1', title: 'Classic Oxford Shirt', category: 'Shirt', image: 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=500', color: 'Light Blue', size: 'M', price: '45.00', purchaseDate: '2026-01-15', status: 'Available' },
+            { id: '2', title: 'Slim Fit Chino Pants', category: 'Pant', image: 'https://images.unsplash.com/photo-1624378439575-d8705ad7ae80?w=500', color: 'Beige', size: '32', price: '60.00', purchaseDate: '2026-02-10', status: 'Available' },
+        ];
+
+        function App() {
+            const [darkMode, setDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
+            const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
+            const [scriptUrl, setScriptUrl] = useState(() => {
+                return localStorage.getItem('sheets_script_url') || 'https://script.google.com/macros/s/AKfycbw9Y1LN3BcGEHXOQhpHOJ_4cJs_1zABasLGE4iAMlOEnpX1Z0iYLl8mP84m31KIvp-AHA/exec';
+            });
+
+            const [items, setItems] = useState([]);
+            const [isLoading, setIsLoading] = useState(false);
+            const [syncStatus, setSyncStatus] = useState('');
+
+            const [expandedItemId, setExpandedItemId] = useState(null);
+
+            const [selectedCategory, setSelectedCategory] = useState('All');
+            const [searchQuery, setSearchQuery] = useState('');
+            const [isFabMenuOpen, setIsFabMenuOpen] = useState(false);
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [modalTab, setModalTab] = useState('add');
+            
+            const [editingId, setEditingId] = useState(null);
+            const [formData, setFormData] = useState({
+                title: '',
+                category: 'Shirt',
+                image: '',
+                color: '',
+                size: '',
+                price: '',
+                purchaseDate: new Date().toISOString().split('T')[0],
+                status: 'Available'
+            });
+
+            useEffect(() => {
+                if (darkMode) {
+                    document.documentElement.classList.add('dark');
+                    localStorage.setItem('theme', 'dark');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                    localStorage.setItem('theme', 'light');
+                }
+            }, [darkMode]);
+
+            useEffect(() => {
+                localStorage.setItem('sheets_script_url', scriptUrl);
+            }, [scriptUrl]);
+
+            useEffect(() => {
+                fetchItemsFromSheet();
+            }, [scriptUrl]);
+
+            const fetchItemsFromSheet = async () => {
+                if (!scriptUrl) {
+                    setItems(INITIAL_ITEMS);
+                    return;
+                }
+                setIsLoading(true);
+                setSyncStatus('Syncing...');
+                try {
+                    const response = await fetch(scriptUrl);
+                    const data = await response.json();
+                    if (Array.isArray(data) && data.length > 0) {
+                        setItems(data);
+                        setSyncStatus('Synced ✅');
+                    } else {
+                        setItems(INITIAL_ITEMS);
+                        setSyncStatus('Sheet empty');
+                    }
+                } catch (err) {
+                    setItems(INITIAL_ITEMS);
+                    setSyncStatus('Offline ⚠️');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const syncToSheet = async (action, item) => {
+                if (!scriptUrl) return;
+                try {
+                    await fetch(scriptUrl, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action, item })
+                    });
+                } catch (err) {
+                    console.error('Sync error:', err);
+                }
+            };
+
+            const categories = ['All', ...new Set(items.map(i => i.category))];
+
+            const filteredItems = items.filter(item => {
+                const matchesCat = selectedCategory === 'All' || item.category === selectedCategory;
+                const matchesSearch = (item.title || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
+                                      (item.color || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                                      (item.category || '').toLowerCase().includes(searchQuery.toLowerCase());
+                return matchesCat && matchesSearch;
+            });
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                let updatedItems;
+                const targetId = editingId || Date.now().toString();
+                const itemPayload = { ...formData, id: targetId };
+
+                if (editingId) {
+                    updatedItems = items.map(item => item.id === editingId ? itemPayload : item);
+                    setEditingId(null);
+                } else {
+                    updatedItems = [itemPayload, ...items];
+                }
+
+                setItems(updatedItems);
+                syncToSheet(editingId ? 'update' : 'save', itemPayload);
+
+                setFormData({
+                    title: '',
+                    category: 'Shirt',
+                    image: '',
+                    color: '',
+                    size: '',
+                    price: '',
+                    purchaseDate: new Date().toISOString().split('T')[0],
+                    status: 'Available'
+                });
+                setIsModalOpen(false);
+            };
+
+            const handleEdit = (item) => {
+                setFormData(item);
+                setEditingId(item.id);
+                setModalTab('add');
+                setIsModalOpen(true);
+            };
+
+            const handleDelete = (id) => {
+                if (confirm('Delete this item?')) {
+                    const itemToDelete = items.find(i => i.id === id);
+                    const updatedItems = items.filter(item => item.id !== id);
+                    setItems(updatedItems);
+                    syncToSheet('delete', itemToDelete);
+                }
+            };
+
+            const handleStatusChange = (id, newStatus) => {
+                const updatedItems = items.map(i => {
+                    if (i.id === id) {
+                        const updatedItem = { ...i, status: newStatus };
+                        syncToSheet('update', updatedItem);
+                        return updatedItem;
+                    }
+                    return i;
+                });
+                setItems(updatedItems);
+            };
+
+            return (
+                <div className="min-h-screen pb-24">
+                    {/* Fixed Header with high z-index */}
+                    <header className="fixed top-0 left-0 right-0 z-50 bg-white/90 dark:bg-slate-800/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-700 transition-all duration-300 shadow-sm">
+                        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-indigo-600 text-white rounded-xl font-bold text-base shadow-md">👔</div>
+                                <div>
+                                    <div className="flex items-center gap-2">
+                                        <h1 className="text-lg font-extrabold tracking-tight">MyClothing</h1>
+                                        <span className="text-[10px] bg-indigo-100 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-semibold px-2 py-0.5 rounded-full">
+                                            {syncStatus}
+                                        </span>
+                                    </div>
+                                    {!isHeaderCollapsed && <p className="text-[11px] text-slate-500 dark:text-slate-400">Connected to Google Sheets</p>}
+                                </div>
+                            </div>
+                            <button 
+                                onClick={() => setIsHeaderCollapsed(!isHeaderCollapsed)}
+                                className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 text-xs font-semibold"
+                            >
+                                {isHeaderCollapsed ? 'Show Controls' : 'Hide Controls'}
+                            </button>
+                        </div>
+
+                        {!isHeaderCollapsed && (
+                            <div className="border-t border-slate-100 dark:border-slate-700/50">
+                                <div className="max-w-7xl mx-auto px-4 py-2.5 flex flex-col sm:flex-row items-center justify-between gap-2.5">
+                                    <input 
+                                        type="text" 
+                                        placeholder="Search clothes..." 
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        className="w-full sm:w-72 px-4 py-1.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm focus:outline-none"
+                                    />
+                                    <div className="flex gap-2 overflow-x-auto w-full sm:w-auto pb-1 sm:pb-0">
+                                        {categories.map(cat => (
+                                            <button
+                                                key={cat}
+                                                onClick={() => setSelectedCategory(cat)}
+                                                className={`px-3.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition ${
+                                                    selectedCategory === cat 
+                                                        ? 'bg-indigo-600 text-white shadow-sm' 
+                                                        : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                                                }`}
+                                            >
+                                                {cat}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </header>
+
+                    {/* Main Content with dynamic top padding so items don't overlap header */}
+                    <main className={`max-w-7xl mx-auto px-4 transition-all duration-300 ${isHeaderCollapsed ? 'pt-20' : 'pt-32'}`}>
+                        {isLoading ? (
+                            <div className="text-center py-20 text-slate-400 font-medium">Loading items from Google Sheet...</div>
+                        ) : filteredItems.length === 0 ? (
+                            <div className="text-center py-20 bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700">
+                                <p className="text-4xl mb-3">🏷️</p>
+                                <h3 className="text-lg font-bold">No clothing items found</h3>
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                                {filteredItems.map(item => {
+                                    const isExpanded = expandedItemId === item.id;
+                                    return (
+                                        <div 
+                                            key={item.id} 
+                                            onClick={() => setExpandedItemId(isExpanded ? null : item.id)}
+                                            className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow-sm hover:shadow-md transition cursor-pointer flex flex-col group"
+                                        >
+                                            <div className="relative h-60 bg-slate-100 dark:bg-slate-900 overflow-hidden">
+                                                <img 
+                                                    src={convertDriveLink(item.image)} 
+                                                    alt={item.title}
+                                                    className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                                                    onError={(e)=>{e.target.src='https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=500'}}
+                                                />
+                                                <span className="absolute top-3 left-3 px-2.5 py-1 bg-black/60 text-white text-[10px] font-bold uppercase rounded-lg backdrop-blur">
+                                                    {item.category}
+                                                </span>
+                                            </div>
+
+                                            <div className="p-4 flex-1 flex flex-col justify-between">
+                                                <div>
+                                                    <div className="flex justify-between items-center gap-2">
+                                                        <h3 className="font-bold text-base line-clamp-1">{item.title}</h3>
+                                                        {/*<span className="font-extrabold text-indigo-600 dark:text-indigo-400 text-sm">${item.price}</span>*/}
+                                                    </div>
+                                                    <p className="text-[11px] text-slate-400 mt-1 flex items-center justify-between">
+                                                        <span>{isExpanded ? 'Tap to hide details' : 'Tap to show details'}</span>
+                                                    </p>
+                                                </div>
+
+                                                {/* Expanded Details Section */}
+                                                {isExpanded && (
+                                                    <div 
+                                                        onClick={(e) => e.stopPropagation()} 
+                                                        className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-700/70 space-y-2 text-xs animate-in fade-in duration-200"
+                                                    >
+                                                        <div className="flex justify-between items-center">
+                                                            <span className="text-slate-400">Color:</span>
+                                                            <span className="font-semibold">{item.color || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex justify-between items-center">
+                                                            <span className="text-slate-400">Size:</span>
+                                                            <span className="font-semibold">{item.size || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex justify-between items-center">
+                                                            <span className="text-slate-400">Purchase Date:</span>
+                                                            <span className="font-semibold">{item.purchaseDate || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex justify-between items-center">
+                                                            <span className="text-slate-400">Status:</span>
+                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                                                item.status === 'Available' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400'
+                                                            }`}>
+                                                                {item.status || 'Available'}
+                                                            </span>
+                                                        </div>
+
+                                                        {/*<div className="pt-2 flex justify-end gap-2 border-t border-slate-100 dark:border-slate-700/50">
+                                                            <button onClick={() => handleEdit(item)} className="px-2.5 py-1 text-xs bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 font-bold rounded">Edit</button>
+                                                            <button onClick={() => handleDelete(item.id)} className="px-2.5 py-1 text-xs bg-rose-50 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400 font-bold rounded">Delete</button>
+                                                        </div>*/}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Floating Action Menu */}
+                    <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end">
+                        {isFabMenuOpen && (
+                            <div className="mb-3 bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-2 w-56 flex flex-col gap-1">
+                                <button
+                                    onClick={() => {
+                                        setIsFabMenuOpen(false);
+                                        setEditingId(null);
+                                        setFormData({
+                                            title: '', category: 'Shirt', image: '', color: '', size: '', price: '',
+                                            purchaseDate: new Date().toISOString().split('T')[0], status: 'Available'
+                                        });
+                                        setModalTab('add');
+                                        setIsModalOpen(true);
+                                    }}
+                                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 text-sm font-semibold text-left"
+                                >
+                                    <span>➕</span> Add Item
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setIsFabMenuOpen(false);
+                                        setModalTab('manage');
+                                        setIsModalOpen(true);
+                                    }}
+                                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 text-sm font-semibold text-left"
+                                >
+                                    <span>⚙️</span> Edit / Manage Items
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setIsFabMenuOpen(false);
+                                        setModalTab('settings');
+                                        setIsModalOpen(true);
+                                    }}
+                                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 text-sm font-semibold text-left"
+                                >
+                                    <span>🔗</span> Google Sheets API
+                                </button>
+                                <button
+                                    onClick={() => setDarkMode(!darkMode)}
+                                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 text-sm font-semibold text-left"
+                                >
+                                    <span>{darkMode ? '☀️' : '🌙'}</span> Toggle Theme
+                                </button>
+                            </div>
+                        )}
+
+                        <button
+                            onClick={() => setIsFabMenuOpen(!isFabMenuOpen)}
+                            className="w-14 h-14 bg-indigo-600 text-white rounded-full shadow-2xl flex items-center justify-center font-bold text-2xl hover:scale-105 transition"
+                        >
+                            {isFabMenuOpen ? '✕' : '✨'}
+                        </button>
+                    </div>
+
+                    {/* Modal */}
+                    {isModalOpen && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                            <div className="bg-white dark:bg-slate-800 rounded-3xl w-full max-w-xl overflow-hidden shadow-2xl border border-slate-200 dark:border-slate-700 max-h-[90vh] flex flex-col">
+                                <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex justify-between items-center bg-slate-50 dark:bg-slate-900">
+                                    <div className="flex gap-2">
+                                        <button onClick={() => setModalTab('add')} className={`px-3 py-2 rounded-xl text-xs font-bold ${modalTab === 'add' ? 'bg-indigo-600 text-white' : 'text-slate-600 dark:text-slate-400'}`}>
+                                            {editingId ? 'Edit Item' : 'Add Item'}
+                                        </button>
+                                        <button onClick={() => setModalTab('manage')} className={`px-3 py-2 rounded-xl text-xs font-bold ${modalTab === 'manage' ? 'bg-indigo-600 text-white' : 'text-slate-600 dark:text-slate-400'}`}>
+                                            Manage ({items.length})
+                                        </button>
+                                        <button onClick={() => setModalTab('settings')} className={`px-3 py-2 rounded-xl text-xs font-bold ${modalTab === 'settings' ? 'bg-indigo-600 text-white' : 'text-slate-600 dark:text-slate-400'}`}>
+                                            API Settings
+                                        </button>
+                                    </div>
+                                    <button onClick={() => setIsModalOpen(false)} className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-700 flex items-center justify-center font-bold">✕</button>
+                                </div>
+
+                                <div className="p-6 overflow-y-auto flex-1">
+                                    {modalTab === 'add' && (
+                                        <form onSubmit={handleSubmit} className="space-y-4">
+                                            <div>
+                                                <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Item Title</label>
+                                                <input type="text" required value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm" />
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Category</label>
+                                                    <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm">
+                                                        <option value="Shirt">Shirt</option>
+                                                        <option value="Pant">Pant</option>
+                                                        <option value="T-Shirt">T-Shirt</option>
+                                                        <option value="Outerwear">Outerwear</option>
+                                                        <option value="Jeans">Jeans</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Status</label>
+                                                    <select value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm">
+                                                        <option value="In use">In use</option>
+                                                        <option value="In Laundry">In Laundry</option>
+                                                        <option value="Packed">Packed</option>
+                                                        <option value="Discarded">Discarded</option>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Google Drive Image Share Link</label>
+                                                <input type="url" value={formData.image} onChange={e => setFormData({...formData, image: e.target.value})} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm" />
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Color</label>
+                                                    <input type="text" value={formData.color} onChange={e => setFormData({...formData, color: e.target.value})} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Size</label>
+                                                    <input type="text" value={formData.size} onChange={e => setFormData({...formData, size: e.target.value})} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm" />
+                                                </div>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Price ($)</label>
+                                                    <input type="number" step="0.01" value={formData.price} onChange={e => setFormData({...formData, price: e.target.value})} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Purchase Date</label>
+                                                    <input type="date" value={formData.purchaseDate} onChange={e => setFormData({...formData, purchaseDate: e.target.value})} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm" />
+                                                </div>
+                                            </div>
+                                            <button type="submit" className="w-full mt-4 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-lg">
+                                                {editingId ? 'Save Changes' : 'Add Item'}
+                                            </button>
+                                        </form>
+                                    )}
+
+                                    {modalTab === 'manage' && (
+                                        <div className="space-y-3">
+                                            {items.map(item => (
+                                                <div key={item.id} className="flex items-center justify-between p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
+                                                    <div className="flex items-center gap-3">
+                                                        <img src={convertDriveLink(item.image)} className="w-10 h-10 object-cover rounded-lg" />
+                                                        <div>
+                                                            <h4 className="font-bold text-sm">{item.title}</h4>
+                                                            <p className="text-xs text-slate-400">{item.category} • {item.color} • ${item.price}</p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <select value={item.status || 'In use'} onChange={(e) => handleStatusChange(item.id, e.target.value)} className="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800">
+                                                            <option value="In use">In use</option>
+                                                            <option value="In Laundry">In Laundry</option>
+                                                            <option value="Packed">Packed</option>
+                                                            <option value="Discarded">Discarded</option>
+                                                        </select>
+                                                        <button onClick={() => handleEdit(item)} className="px-2.5 py-1 text-xs text-indigo-600 font-bold">Edit</button>
+                                                        <button onClick={() => handleDelete(item.id)} className="px-2.5 py-1 text-xs text-rose-600 font-bold">X</button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    {modalTab === 'settings' && (
+                                        <div className="space-y-4">
+                                            <div>
+                                                <label className="block text-xs font-bold mb-1 uppercase text-slate-500">Google Apps Script Web App URL</label>
+                                                <input type="url" value={scriptUrl} onChange={e => setScriptUrl(e.target.value)} className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm" />
+                                            </div>
+                                            <button onClick={fetchItemsFromSheet} className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">Reload / Test Connection</button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
