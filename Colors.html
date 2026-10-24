@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>COLOR</title>
+</head>
+<style>
+    *{
+        margin: 0%;
+        padding: 0%;
+    }
+    #container{
+        width: 100vw;
+        height: 100vh;
+        background-color: black;
+    }
+    .tap{
+        height: 20%;
+        width: 10vw;
+        /* border: 1px solid white; */
+    }
+</style>
+<body>
+    <div id="container">
+        <div onclick="myFunction()"></div>
+        <div class="tap" id="box" onclick="tapFunction()"></div>
+    </div>
+</body>
+<script>
+    let count = 0;
+    let tap = 1;
+
+    function tapFunction(){
+        tap ++;
+    }
+
+    let color= ["red", "yellow", "green", "blue", "white", "violet", "palegoldenrod", "palegreen", "paleturquoise", "palevioletred", "pink", "gray", "orange", "purple", "aqua", "maroon", "coral", "beige", "azure", "magenta", "indigo", "navy", "lime", "crimson", "gold", "lavender", "olive", "violet", "jade", "silver"];
+
+    function myFunction(){
+        document.getElementById("container").style.backgroundColor=`${color[count]}`;
+        count ++;
+
+        if(count>29)
+            count = 0;
+
+        if(tap%10==0)
+            count --;
+        setTimeout(function(){myFunction()},1000);
+    }
+    myFunction();
+</script>
+</html>
