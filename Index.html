@@ -60,16 +60,22 @@
         0
       );
 
+      const fairShare = users.length ? totalSpent / users.length : 0;
+
       const userStats = users.map(user => {
         const totalPaid = regularExpenses
           .filter(e => e.paidBy === user.name)
           .reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
-        // Calculate share based on splitBetween array
         const totalShareOwed = regularExpenses.reduce((sum, e) => {
-          const participants = (e.splitBetween && e.splitBetween.length > 0)
-            ? e.splitBetween
-            : users.map(u => u.name); // Default to all users if blank
+          let participants = [];
+          if (typeof e.splitBetween === 'string' && e.splitBetween.trim()) {
+            participants = e.splitBetween.split(',').map(s => s.trim());
+          } else if (Array.isArray(e.splitBetween) && e.splitBetween.length > 0) {
+            participants = e.splitBetween;
+          } else {
+            participants = users.map(u => u.name);
+          }
 
           if (participants.includes(user.name)) {
             return sum + (Number(e.amount || 0) / participants.length);
@@ -129,7 +135,7 @@
         if (creditor.remaining < 0.005) c++;
       }
 
-      return { regularExpenses, settlementRecords, totalSpent, userStats, settlements };
+      return { regularExpenses, settlementRecords, totalSpent, fairShare, userStats, settlements };
     }
 
     function App() {
@@ -137,11 +143,21 @@
         () => localStorage.getItem('fairshare_theme') || 'light'
       );
       const [expenses, setExpenses] = useState([]);
-      const [loading, setLoading] = useState(true);
+      const [loading, setLoading] = useState(false);
       const [error, setError] = useState('');
       const [fabOpen, setFabOpen] = useState(false);
       const [modal, setModal] = useState(null);
       const [busy, setBusy] = useState(false);
+
+      const [appPin, setAppPin] = useState(
+        () => sessionStorage.getItem('fairshare_pin') || ''
+      );
+      const [isAuthenticated, setIsAuthenticated] = useState(
+        () => !!sessionStorage.getItem('fairshare_pin')
+      );
+
+      const [loginPin, setLoginPin] = useState('');
+      const [loginError, setLoginError] = useState('');
 
       const summary = useMemo(
         () => calculateSummary(expenses, USERS),
@@ -149,35 +165,61 @@
       );
 
       useEffect(() => {
-        fetchSheetData();
-      }, []);
+        if (isAuthenticated && appPin) {
+          fetchSheetData(appPin);
+        }
+      }, [isAuthenticated, appPin]);
 
       useEffect(() => {
         localStorage.setItem('fairshare_theme', theme);
         document.documentElement.classList.toggle('dark', theme === 'dark');
       }, [theme]);
 
-      async function fetchSheetData() {
+      async function handleAppLogin(e) {
+        e.preventDefault();
+        setLoginError('');
+        setBusy(true);
+
+        try {
+          const response = await fetch(`${API_URL}?action=getData&pin=${encodeURIComponent(loginPin)}&t=${Date.now()}`);
+          const result = await response.json();
+
+          if (result.status === 'success' || Array.isArray(result.expenses)) {
+            sessionStorage.setItem('fairshare_pin', loginPin);
+            setAppPin(loginPin);
+            setIsAuthenticated(true);
+            setExpenses(result.expenses || []);
+          } else {
+            setLoginError(result.message || 'Incorrect PIN.');
+          }
+        } catch (err) {
+          setLoginError('Connection error. Check your PIN or internet.');
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      async function fetchSheetData(pinToUse = appPin) {
+        if (!pinToUse) return;
         setLoading(true);
         setError('');
 
         try {
           const response = await fetch(
-            `${API_URL}?action=getData&t=${Date.now()}`
+            `${API_URL}?action=getData&pin=${encodeURIComponent(pinToUse)}&t=${Date.now()}`
           );
-
-          if (!response.ok) throw new Error('Unable to fetch Google Sheets data.');
-
           const data = await response.json();
 
-          if (Array.isArray(data.expenses)) {
-            setExpenses(data.expenses);
+          if (data.status === 'success' || Array.isArray(data.expenses)) {
+            setExpenses(data.expenses || []);
           } else {
-            throw new Error('The API response does not contain an expenses array.');
+            throw new Error(data.message || 'Unauthorized');
           }
         } catch (err) {
-          console.error('Google Sheets fetch error:', err);
-          setError('Unable to refresh data. Check your connection and try again.');
+          setError('Session expired or incorrect PIN. Please re-authenticate.');
+          setIsAuthenticated(false);
+          sessionStorage.removeItem('fairshare_pin');
+          setAppPin('');
         } finally {
           setLoading(false);
         }
@@ -189,8 +231,8 @@
         setError('');
 
         try {
-          // Convert params object to query string for GET request
-          const queryString = new URLSearchParams(params).toString();
+          const queryParams = { ...params, pin: appPin };
+          const queryString = new URLSearchParams(queryParams).toString();
           const response = await fetch(`${API_URL}?${queryString}`);
 
           if (!response.ok) throw new Error('Network response was not ok.');
@@ -201,12 +243,11 @@
             await fetchSheetData();
             if (onDone) onDone();
           } else {
-            // Handle backend errors (like incorrect PIN)
             setError(result.message || 'Action failed on the server.');
           }
         } catch (err) {
           console.error('Submission error:', err);
-          setError('Unable to save. Check your connection or mobile browser settings.');
+          setError('Unable to save. Check your connection.');
         } finally {
           setBusy(false);
         }
@@ -223,7 +264,7 @@
         }, () => setModal(null));
       }
 
-      function handleSettleUp(settlement, pin, onSuccess, onFailure) {
+      function handleSettleUp(settlement, pin, onSuccess) {
         if (busy) return;
 
         const latest = calculateSummary(expenses, USERS);
@@ -240,13 +281,12 @@
           return;
         }
 
-        // Send pin to backend for verification
         executeSheetAction({
           action: 'addSettlement',
           itemName: `Settlement: ${matchingSettlement.from} paid ${matchingSettlement.to}`,
           amount: matchingSettlement.amount,
           paidBy: matchingSettlement.from,
-          pin: pin,
+          settlementPin: pin,
           timestamp: formatDateTime24()
         }, () => {
           setModal(null);
@@ -256,11 +296,45 @@
 
       const dark = theme === 'dark';
 
+      if (!isAuthenticated) {
+        return (
+          <div className={`min-h-screen flex items-center justify-center p-4 ${dark ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-800'}`}>
+            <div className={`w-full max-w-sm p-6 rounded-3xl shadow-2xl border space-y-5 ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <div className="text-center space-y-2">
+                <span className="text-4xl">🔒</span>
+                <h1 className="text-xl font-bold text-indigo-600 dark:text-indigo-400">FairShare</h1>
+                <p className="text-xs text-slate-400">Enter apartment PIN to unlock</p>
+              </div>
+
+              <form onSubmit={handleAppLogin} className="space-y-4">
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="current-password"
+                  value={loginPin}
+                  onChange={e => setLoginPin(e.target.value)}
+                  placeholder="Enter PIN"
+                  required
+                  autoFocus
+                  className={`w-full rounded-xl border px-4 py-3 text-sm outline-none ${dark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-300'}`}
+                />
+                {loginError && <p className="text-xs text-rose-500 font-medium">{loginError}</p>}
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm transition-all shadow-lg shadow-indigo-600/30 disabled:opacity-50"
+                >
+                  {busy ? 'Unlocking...' : 'Unlock App'}
+                </button>
+              </form>
+            </div>
+          </div>
+        );
+      }
+
       return (
-        <div className={`min-h-screen pb-28 transition-colors ${dark ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-800'
-          }`}>
-          <header className={`sticky top-0 z-30 border-b backdrop-blur-md px-5 py-4 flex justify-between items-center ${dark ? 'bg-slate-900/90 border-slate-800' : 'bg-white/90 border-slate-200'
-            }`}>
+        <div className={`min-h-screen pb-28 transition-colors ${dark ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-800'}`}>
+          <header className={`sticky top-0 z-30 border-b backdrop-blur-md px-5 py-4 flex justify-between items-center ${dark ? 'bg-slate-900/90 border-slate-800' : 'bg-white/90 border-slate-200'}`}>
             <div className="flex items-center gap-3">
               <span className="text-3xl">🏠</span>
               <div>
@@ -268,13 +342,12 @@
                   FairShare
                 </h1>
                 <p className="text-xs text-slate-400">
-                  Total Spent: ₹{money(summary.totalSpent)} {/*·
-                  {' '}₹{money(summary.fairShare)}/person*/}
+                  Total Spent: ₹{money(summary.totalSpent)} · ₹{money(summary.fairShare)}/person
                 </p>
               </div>
             </div>
             <button
-              onClick={fetchSheetData}
+              onClick={() => fetchSheetData(appPin)}
               disabled={loading || busy}
               className="rounded-xl bg-indigo-50 dark:bg-indigo-950 px-3 py-2 text-indigo-600 dark:text-indigo-300 disabled:opacity-50"
               title="Refresh expenses"
@@ -290,9 +363,9 @@
             </div>
 
             {error && (
-              <div className="rounded-xl bg-rose-50 text-rose-700 p-3 text-sm">
-                {error}
-                <button className="ml-2 underline" onClick={() => setError('')}>
+              <div className="rounded-xl bg-rose-50 text-rose-700 p-3 text-sm flex justify-between items-center">
+                <span>{error}</span>
+                <button className="ml-2 underline font-semibold" onClick={() => setError('')}>
                   Dismiss
                 </button>
               </div>
@@ -310,7 +383,6 @@
             ) : (
               <div className="space-y-3">
                 {expenses.map((exp, index) => {
-                  // Normalize splitBetween whether it's an array or a comma-separated string
                   const splitList = Array.isArray(exp.splitBetween)
                     ? exp.splitBetween
                     : (exp.splitBetween ? exp.splitBetween.split(',').map(s => s.trim()).filter(Boolean) : USERS.map(u => u.name));
@@ -318,8 +390,7 @@
                   return (
                     <div
                       key={exp.id ?? `${exp.timestamp}-${index}`}
-                      className={`p-4 rounded-2xl border shadow-sm flex justify-between items-center gap-3 ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'
-                        }`}
+                      className={`p-4 rounded-2xl border shadow-sm flex justify-between items-center gap-3 ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}
                     >
                       <div className="min-w-0 space-y-1.5">
                         <div className="font-semibold break-words">
@@ -337,7 +408,6 @@
                           <span>{formatDateTime24(exp.timestamp)}</span>
                         </div>
 
-                        {/* 👥 Messenger-style overlapping initials for split members */}
                         {!isSettlement(exp) && splitList.length > 0 && (
                           <div className="flex items-center -space-x-1.5 pt-1" title={`Shared by: ${splitList.join(', ')}`}>
                             {splitList.map((userName, idx) => {
@@ -352,9 +422,6 @@
                                 </div>
                               );
                             })}
-                            {/*<span className="text-[10px] text-slate-400 ml-2.5">
-                              ({splitList.length} member{splitList.length > 1 ? 's' : ''})
-                            </span>*/}
                           </div>
                         )}
                       </div>
@@ -374,8 +441,7 @@
 
           <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-3">
             {fabOpen && (
-              <div className={`flex flex-col gap-2 p-2 rounded-2xl shadow-xl border ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'
-                }`}>
+              <div className={`flex flex-col gap-2 p-2 rounded-2xl shadow-xl border ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
                 <button
                   onClick={() => { setModal('SUMMARY'); setFabOpen(false); }}
                   className="text-left px-4 py-3 rounded-xl text-sm hover:bg-slate-100 dark:hover:bg-slate-700"
@@ -448,8 +514,7 @@
 
       return (
         <div className="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className={`w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 rounded-3xl shadow-2xl border space-y-5 ${dark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200'
-            }`}>
+          <div className={`w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 rounded-3xl shadow-2xl border space-y-5 ${dark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200'}`}>
             <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-700 pb-3">
               <h2 className="font-bold text-lg">📊 Settlement Summary</h2>
               <button onClick={onClose} className="text-slate-400 text-xl" aria-label="Close">✕</button>
@@ -457,12 +522,10 @@
 
             <div className="grid grid-cols-2 gap-3">
               {summary.userStats.map(user => (
-                <div key={user.name} className={`p-3 rounded-2xl border ${dark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-100'
-                  }`}>
+                <div key={user.name} className={`p-3 rounded-2xl border ${dark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-100'}`}>
                   <p className="text-xs text-slate-400">{user.name}</p>
                   <p className="font-bold mt-1">₹{money(user.paid)}</p>
-                  <p className={`text-sm font-semibold mt-1 ${user.balance >= -0.005 ? 'text-emerald-500' : 'text-rose-500'
-                    }`}>
+                  <p className={`text-sm font-semibold mt-1 ${user.balance >= -0.005 ? 'text-emerald-500' : 'text-rose-500'}`}>
                     {user.balance > 0.005 ? '+' : user.balance < -0.005 ? '−' : ''}
                     ₹{money(Math.abs(user.balance))}
                   </p>
@@ -477,8 +540,7 @@
               ))}
             </div>
 
-            <div className={`p-4 rounded-2xl border ${dark ? 'bg-slate-900 border-slate-700' : 'bg-indigo-50/50 border-indigo-100'
-              }`}>
+            <div className={`p-4 rounded-2xl border ${dark ? 'bg-slate-900 border-slate-700' : 'bg-indigo-50/50 border-indigo-100'}`}>
               <h3 className="text-xs uppercase tracking-wider font-bold text-indigo-600 dark:text-indigo-400 mb-3">
                 💸 Outstanding Settlement Plan
               </h3>
@@ -519,8 +581,7 @@
 
             {selected && (
               <form onSubmit={confirmSettlement}
-                className={`p-4 rounded-2xl border space-y-3 ${dark ? 'bg-slate-900 border-indigo-500/50' : 'bg-indigo-50 border-indigo-200'
-                  }`}>
+                className={`p-4 rounded-2xl border space-y-3 ${dark ? 'bg-slate-900 border-indigo-500/50' : 'bg-indigo-50 border-indigo-200'}`}>
                 <h3 className="text-sm font-bold">🔒 Confirm Actual Payment</h3>
                 <p className="text-sm">
                   Confirm that <strong>{selected.from}</strong> has already paid
@@ -535,8 +596,7 @@
                   onChange={e => setPin(e.target.value)}
                   placeholder="Enter apartment PIN"
                   required
-                  className={`w-full rounded-xl border px-3 py-3 text-sm outline-none ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-300'
-                    }`}
+                  className={`w-full rounded-xl border px-3 py-3 text-sm outline-none ${dark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-300'}`}
                 />
                 {error && <p className="text-sm text-rose-500">{error}</p>}
                 <div className="flex gap-2">
@@ -579,7 +639,6 @@
 
       function toggleUser(name) {
         if (selectedUsers.includes(name)) {
-          // Don't allow unchecking everyone
           if (selectedUsers.length === 1) return;
           setSelectedUsers(selectedUsers.filter(u => u !== name));
         } else {
@@ -661,8 +720,8 @@
                         type="button"
                         onClick={() => toggleUser(user.name)}
                         className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${isChecked
-                          ? 'bg-indigo-600 border-indigo-600 text-white'
-                          : dark ? 'bg-slate-900 border-slate-700 text-slate-400' : 'bg-slate-100 border-slate-200 text-slate-600'
+                            ? 'bg-indigo-600 border-indigo-600 text-white'
+                            : dark ? 'bg-slate-900 border-slate-700 text-slate-400' : 'bg-slate-100 border-slate-200 text-slate-600'
                           }`}
                       >
                         {user.name}
